@@ -2,7 +2,7 @@ function calculate_plane_offsets_test()
 
 rng( 217828 );
 
-n = 2 * rand( [ 1000 3 ] ) - 1;
+n = 2 * rand( [ 100 3 ] ) - 1;
 n = [ 
     n;
     0 0 1;
@@ -17,7 +17,7 @@ n = [
 n = n ./ vecnorm( n, 2, 2 );
 n = sortrows( n );
 
-fills = rand( [ 1000 1 ] );
+fills = rand( [ 100 1 ] );
 
 [ n_index, fills ] = meshgrid( 1 : size( n, 1 ), fills );
 

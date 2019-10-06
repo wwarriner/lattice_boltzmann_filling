@@ -63,7 +63,13 @@ k_i = permute( k_i, [ 2 3 1 ] ) ./ sum( p .^ 2, 3 ); % was one face_count page
 % compute lambda_i as
 % lambda_i = [face area of all faces using p_i] / [2 * sum face areas]
 % scalar
-lambda_i = areas + circshift( areas, 1 );
+lambda_i = areas + circshift( areas, -1 );
+% bug is here, how do we handle the case where the last point(s) are dummy
+% points?
+% replace dummy areas with the expected area somehow?
+% LHS of above can be areas as is
+% RHS needs to have dummy replaced with 
+%lambda_i( areas == 0 ) = 0;
 lambda_i = lambda_i ./ sum( lambda_i );
 % lambda_i is one value per face per page
 

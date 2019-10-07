@@ -18,25 +18,19 @@ PAGE = 2;
 DIM = 3;
 DUMMY = 4;
 
-% determine ignored
-invalid = any( isnan( points ), DIM ) | any( isnan( normals ), DIM );
-count = numel( invalid );
-invalid = find( invalid );
-
-% build infinitesimal slivers for ignored points from previous point
-invalid = invalid + ( 0 : count : numel( points ) - 1 );
-prev = invalid - 1;
-points( invalid ) = points( prev );
+points = post_rep_fill( points, @(x)~isnan(x) );
+normals = post_rep_fill( normals, @(x)~isnan(x) );
 
 % determine triangle face areas
 p = points( 2 : end, :, : ) - points( 1, :, : ); % by VEC
 N = cross( p, -circshift( p, VEC ), DIM );
 vn = vecnorm( N, 2, DIM );
 areas = 0.5 * vn;
+vn = post_rep_fill( vn, @(x)x~=0 );
 
 % compute weighted mean normal
 % weights are face areas
-vn( vn == 0 ) = 1; % hack fix vec norms for sliver triangles
+%vn( vn == 0 ) = 1; % hack fix vec norms for sliver triangles
 N = N ./ vn;
 N = sum( areas .* N, VEC );
 N = N ./ vecnorm( N, 2, DIM );
@@ -63,14 +57,14 @@ k_i = permute( k_i, [ 2 3 1 ] ) ./ sum( p .^ 2, 3 ); % was one face_count page
 % compute lambda_i as
 % lambda_i = [face area of all faces using p_i] / [2 * sum face areas]
 % scalar
+invalid = areas == 0;
+areas = circshift( areas, -1 );
+areas = flip( post_rep_fill( flip( areas, VEC ), @(x)x~=0 ), VEC );
+areas = circshift( areas, 1 );
 lambda_i = areas + circshift( areas, -1 );
-% bug is here, how do we handle the case where the last point(s) are dummy
-% points?
-% replace dummy areas with the expected area somehow?
-% LHS of above can be areas as is
-% RHS needs to have dummy replaced with 
-%lambda_i( areas == 0 ) = 0;
+lambda_i( invalid ) = 0;
 lambda_i = lambda_i ./ sum( lambda_i );
+% TODO may be a miscalculation
 % lambda_i is one value per face per page
 
 % to vectorize, some points will be "nonsense" points

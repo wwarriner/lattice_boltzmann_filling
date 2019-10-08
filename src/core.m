@@ -1,4 +1,4 @@
-function core(inputArg1,inputArg2)
+function core()
 %% LATTICE CONSTANTS
 % D2Q9
 d = 2;
@@ -29,6 +29,8 @@ full_shape = [ q shape ];
 full_count = prod( full_shape );
 full_stride = [ 1 cumprod( full_shape( 1 : end - 1 ) ) ];
 
+n_off = generate_neighbor_offsets( shape );
+
 %% MATERIAL IDS
 SOLID = 0;
 AIR = 1;
@@ -55,12 +57,14 @@ c_s_lbm = 1.0 / sqrt( 3.0 ); % LBM speed of sound, D2Q9, D3Q19 [ - ]
 tau = nu_lbm / c_s_lbm^2 + 1.0 / 2.0; % LBM relaxation time [ - ]
 assert( 0.5 < tau & tau < 5.0 );
 
-g_p = 980000000000/2; % gravitational acceleration [ m / s^2 ]
+g_p = 9.8; % gravitational acceleration [ m / s^2 ]
 g_lbm = ( dt ^ 2 / dx ) * g_p; % LBM gravitational acceleration [ - ]
 sg_lbm = g_lbm ./ sqrt( 2 ); % edge diagonal
 dg = -g_lbm .* cy; % gravitational force D2Q9
 % dg = -[ g_lbm .* cz( 1 : 7 ); sg_lbm .* cz( 8 : end ) ]; % gravitational force D3Q19
 wdg = w .* dg;
+
+rho_g = 1.0;
 
 %% VARIABLE SETUP
 % macroscopic variables
@@ -74,6 +78,8 @@ f_inter = zeros( full_shape );
 f = zeros( full_shape );
 
 %% INITIAL CONDITIONS
+% GEOMETRY MUST HAVE OUTER SOLID BOUNDARY!
+
 INITIAL_SOLID = false( shape );
 INITIAL_SOLID( 1, : ) = true;
 INITIAL_SOLID( end, : ) = true;
@@ -131,8 +137,8 @@ for cycle = 1 : time_step_count
     % convert and distribute
     
     %% mesh
-    filled = material == LIQUID;
-    empty = material == AIR;
+    liquid = material == LIQUID;
+    air = material == AIR;
     interface = material == INTERFACE;
     
     if any( imdilate( material == AIR, conndef( d+1, "maximal" ) ) & material == LIQUID, "all" )
@@ -147,7 +153,7 @@ for cycle = 1 : time_step_count
     %% obstacle-fluid full bounce-back
     for i = 1 : q
         n = circshift( material == SOLID, [ 0 cx( i ) cy( i ) ] );
-        POI = ( filled | interface ) & n;
+        POI = ( liquid | interface ) & n;
         %POI_n = circshift( POI, -[ 0 cx( i ) cy( i ) ] );
         f_inter( opp( i ), POI ) = f( i, POI );
     end
@@ -155,7 +161,7 @@ for cycle = 1 : time_step_count
     %% interface mass flow
     dm = zeros( aug_shape );
     for i = 2 : q
-        n = circshift( filled, [ 0 cx( i ) cy( i ) ] );
+        n = circshift( liquid, [ 0 cx( i ) cy( i ) ] );
         POI = interface & n;
         POI_n = circshift( POI, -[ 0 cx( i ) cy( i ) ] );
         dm( POI ) = dm( POI ) ...
@@ -176,18 +182,25 @@ for cycle = 1 : time_step_count
     %% equilibrium
     ux = reshape( ( cx.' * reshape( f_inter, flat_shape ) ), aug_shape );
     uy = reshape( ( cy.' * reshape( f_inter, flat_shape ) ), aug_shape );
-    [ f_equil, ~ ] = kernel( rho, w, cx, cy, ux, uy );
+    [ f_equil, u2 ] = kernel( rho, ux, uy, w, cx, cy );
     
     %% gas-interface full bounce-back
+    int = find( interface );
+    f_eq_temp = kernel( rho_g, ux( int ), uy( int ), w, cx, cy );
     for i = 1 : q
-        n = circshift( empty, [ 0 cx( i ) cy( i ) ] );
-        % todo include normal checking
-        POI = interface & n;
-        POI_n = circshift( POI, -[ 0 cx( i ) cy( i ) ] );
-        f_inter( opp( i ), POI ) = ...
-            + f_equil( i, POI_n ) ...
-            + f_equil( opp( i ), POI_n ) ...
-            - f_inter( i, POI );
+        f_inter( opp( i ), int ) = ...
+            + f_eq_temp( i, : ) ...
+            + f_eq_temp( opp( i ), : ) ...
+            - f_inter( i, int );
+        % TODO this is more complicated than I thought
+        % will take some thinking...
+        %
+        % need to compute kernel for all interface cells whose i-th neighbor is
+        % empty
+        % then assign to the empty cell i-th f_inter:
+        %  + f_eq i-th
+        %  + f_eq opp-th
+        %  - f_inter opp-th
     end
     
     %% collision
@@ -195,45 +208,75 @@ for cycle = 1 : time_step_count
     
     %% update macros
     rho = sum( f );
+    u = sqrt( u2 );
     % bubble update
     
     %% convert from interface
     TOL = 1e-3;
+    LOWER_FILL_BOUND = -TOL;
+    int_to_air = find( fill < LOWER_FILL_BOUND & interface );
+    liq_to_int = [];
+    for i = 1 : numel( int_to_air )
+        index = int_to_air( i );
+        neigh = index + n_off;
+        inter_neigh = neigh( interface( neigh ) );
+        missing = mass( index );
+        missing = missing ./ numel( inter_neigh );
+        mass( inter_neigh ) = mass( inter_neigh ) + missing;
+        mass( index ) = 0.0;
+        fill( index ) = 0.0;
+        material( index ) = AIR;
+        liq_neigh = neigh( liquid( neigh ) );
+        liq_to_int = [ liq_to_int; liq_neigh ];
+    end
     
-    int_to_air = fill < -TOL & interface;
-    missing = -mass( int_to_air );
-    material( int_to_air ) = AIR;
-    mass( int_to_air ) = 0.0;
-    fill( int_to_air ) = 0.0;
-    
-    int_to_liq = 1 + TOL < fill & interface;
-    excess = mass( int_to_liq ) - 1.0;
-    material( int_to_liq ) = LIQUID;
-    mass( int_to_liq ) = 1.0;
-    fill( int_to_liq ) = 1.0;
+    UPPER_FILL_BOUND = 1 + TOL;
+    int_to_liq = find( UPPER_FILL_BOUND < fill & interface );
+    air_to_int = [];
+    for i = 1 : numel( int_to_liq )
+        index = int_to_liq( i );
+        neigh = index + n_off;
+        inter_neigh = neigh( interface( neigh ) );
+        excess = mass( index );
+        excess = excess ./ numel( inter_neigh );
+        mass( inter_neigh ) = mass( inter_neigh ) + excess;
+        mass( index ) = 1.0;
+        fill( index ) = 1.0;
+        material( index ) = LIQUID;
+        air_neigh = neigh( air( neigh ) );
+        air_to_int = [ air_to_int; air_neigh ];
+    end
     
     %% convert to interface
-    ii = imdilate( int_to_liq, conndef( d + 1, "maximal" ) );
-    air_to_int = ii & ( empty | int_to_air ) & ~int_to_liq;
+    mean_rho = zeros( size( air_to_int ) );
+    mean_ux = zeros( size( air_to_int ) );
+    mean_uy = zeros( size( air_to_int ) );
+    for i = 1 : numel( air_to_int )
+        index = air_to_int( i );
+        neigh = index + n_off;
+        liq_inter_neigh = [ neigh( interface( neigh ) ); neigh( liquid( neigh ) ) ];
+        mean_rho( i ) = mean( rho( liq_inter_neigh ) );
+        mean_ux( i ) = mean( ux( liq_inter_neigh ) );
+        mean_uy( i ) = mean( uy( liq_inter_neigh ) );
+        mass( index ) = 0.0;
+        fill( index ) = 0.0;
+        material( index ) = INTERFACE;
+    end
+    f( :, air_to_int ) = kernel( mean_rho, mean_ux, mean_uy, w, cx, cy );
     
-    ii = imdilate( int_to_air, conndef( d + 1, "maximal" ) );
-    liq_to_int = ii & ( filled | int_to_liq ) & ~int_to_air;
+    for i = 1 : numel( liq_to_int )
+        index = liq_to_int( i );
+        mass( index ) = 1.0;
+        fill( index ) = 1.0;
+        material( index ) = INTERFACE;
+    end
     
     
-    material( liq_to_int ) = INTERFACE;
-    mass( liq_to_int ) = 1.0;
-    fill( liq_to_int ) = 1.0;
-    
-    material( air_to_int ) = INTERFACE;
-    mass( air_to_int ) = 0.0;
-    fill( air_to_int ) = 0.0;
-    
-    % need to implement the remaining functionality of conversions
-    % computing rho, u, and then equilibrium f
-    
-    assert( ~any( imdilate( material == AIR, conndef( d+1, "maximal" ) ) & material == LIQUID, "all" ) );
     if any( material == AIR & fill > 0.0, "all" ) || any( material == LIQUID & fill < 1.0, "all" )
-        [];
+        assert( false );
+    end
+    if any( imdilate( material == AIR, conndef( 3, "maximal" ) ) & material == LIQUID, "all" )
+        assert( false );
     end
     
     fprintf( "%i %i %i %i\n", sum( int_to_liq, "all" ), sum( int_to_air, "all" ), sum( liq_to_int, "all" ), sum( liq_to_int, "all" ) );
@@ -247,11 +290,23 @@ end
 end
 
 
-function [ f_eq, u2 ] = kernel( rho, w, cx, cy, ux, uy )
+function [ f_eq, u2 ] = kernel( rho, ux, uy, w, cx, cy )
+
+if isempty( rho )
+    f_eq = [];
+    u2 = [];
+    return;
+end
 
 u2 = ux .^ 2 + uy .^ 2;
-cu = 3.0 .* ( cx .* ux + cy .* uy );
-f_eq = w .* ( rho + cu + 0.5 .* cu .^ 2 - 1.5 .* u2 );
+
+if isvector( rho )
+    cu = 3.0 .* ( cx .* ux.' + cy .* uy.' );
+    f_eq = w .* ( rho.' + cu + 0.5 .* cu .^ 2 - 1.5 .* u2.' );
+else
+    cu = 3.0 .* ( cx .* ux + cy .* uy );
+    f_eq = w .* ( rho + cu + 0.5 .* cu .^ 2 - 1.5 .* u2 );
+end
 
 end
 
